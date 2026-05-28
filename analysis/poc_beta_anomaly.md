@@ -124,3 +124,66 @@ Combiné : "β-toolkit" for time-series practitioners.
 2. β-detector vs Anomaly Transformer (SOTA fair comparison)
 3. β-meter sur ECG MIT-BIH arrhythmia (medical applicable)
 4. β-meter sur cryptocurrency volatility regime change
+
+---
+
+# ADDENDUM : PoC ODE Generator (Path D) — VALIDÉ
+
+## Setup
+
+ODE Euler trained sur Lorenz attractor → autoregressive rollout 1000 timesteps depuis random init → measure β of generated sequence.
+
+## Findings
+
+### β activations tunable via n_steps
+
+| dt | 8 | 16 | 32 | 64 |
+|---|---|---|---|---|
+| 0.01 | 1.36 | 1.37 | 1.60 | 1.70 |
+| 0.05 | 1.32 | 1.37 | 1.61 | 1.71 |
+| 0.10 | 1.28 | 1.37 | 1.61 | 1.72 |
+| 0.30 | 1.21 | 1.37 | 1.60 | 1.74 |
+| 0.50 | 1.18 | 1.38 | 1.62 | 1.78 |
+
+**Pattern** : n_steps domine, dt secondaire. β activations tunable ∈ [1.18, 1.78].
+**Nouveau** : n_steps=64 → β=1.78 > plafond initial 1.57 (cassé)
+
+### β output autoregressive rollout = 2.0 universel
+
+| dt | 8 | 16 | 32 | 64 |
+|---|---|---|---|---|
+| 0.05 | 1.98 | 1.99 | 2.03 | 1.97 |
+| 0.10 | 2.11 | 2.10 | 2.00 | 2.03 |
+| 0.20 | 2.29 | 2.10 | 2.03 | 1.97 |
+| 0.50 | 2.06 | 2.14 | 2.17 | 1.41* |
+
+*dt=0.5 n_steps=64 instable (blow up edge case)
+
+**Pattern fort** : autoregressive rollout produit β ≈ 2.0 stable, indépendant config.
+Interprétation : intégration temporelle de noise → Brownian-motion-like signature β=2.
+
+## Application data augmentation
+
+Setup viable :
+- Train ODE Euler once (~30s)
+- Autoregressive rollout n samples avec β contrôlé ≈2
+- Stable, cheap, deterministic-up-to-seed
+
+**Use cases** :
+- Time-series classification : augment rare classes avec β-matched synthetic
+- Anomaly detection training : generate diverse β=2 background
+- Benchmark synthesis : controlled difficulty datasets via β manipulation
+
+## Synthèse 2 PoC validés
+
+| PoC | Status | AUROC/Result | Actionable |
+|---|---|---|---|
+| A : β-meter raw signal | ✓ Validé | AUROC 0.78-0.99 | Open-source lib "spectral-anomaly" |
+| D : ODE β-controlled gen | ✓ Validé | β=2.0 stable rollout | Data aug toolkit |
+
+**Recommandation** : packager les 2 ensemble = **β-toolkit** Python library :
+- `from beta_toolkit import beta_meter, ode_generator`
+- `beta_meter(signal)` → β anomaly score
+- `ode_generator.sample(n=1000, beta_target=2.0)` → synthetic signal
+
+Repo : `metamorphic-systems/poc/` (à créer)
