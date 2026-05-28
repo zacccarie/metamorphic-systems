@@ -261,6 +261,109 @@ def train_track_beta(seed: int = 0, depth: int = 3) -> dict:
     }
 
 
+@app.function(image=image, gpu="A10", timeout=600)
+def train_beta_depth_gauss(seed: int = 0, depth: int = 3) -> dict:
+    """Track β at EACH layer of MLP with Gaussian input. Does β grow with depth ?"""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+
+    device = torch.device("cuda")
+    rng = np.random.default_rng(seed)
+    n = 5000
+    traj = rng.normal(0, 1, (n, 3)).astype(np.float32)
+    window = 4
+    X = np.stack([traj[i: i + window].flatten() for i in range(len(traj) - window - 1)])
+    Y = traj[window:window + len(X)]
+    X = torch.from_numpy(X[:1000]).to(device); Y = torch.from_numpy(Y[:1000]).to(device)
+
+    class MLP(nn.Module):
+        def __init__(self, in_d, h, out_d, depth):
+            super().__init__()
+            layers = []
+            d_in = in_d
+            for _ in range(depth):
+                layers.append(nn.Linear(d_in, h))
+                layers.append(nn.GELU())
+                d_in = h
+            layers.append(nn.Linear(h, out_d))
+            self.net = nn.Sequential(*layers)
+            self.activations = []
+        def forward(self, x):
+            self.activations.clear()
+            h = x
+            for layer in self.net:
+                h = layer(h)
+                if isinstance(layer, nn.GELU):
+                    self.activations.append(h.detach())
+            return h
+
+    torch.manual_seed(seed); np.random.seed(seed)
+    model = MLP(12, 64, 3, depth).to(device)
+    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+    def compute_beta(h):
+        h = h.cpu().numpy()
+        if h.shape[0] < 16:
+            return 0.0
+        fft = np.fft.rfft(h, axis=0)
+        power = (np.abs(fft) ** 2).mean(axis=1)
+        freqs = np.arange(1, len(power))
+        log_f = np.log(freqs + 1e-9)
+        log_p = np.log(power[1:] + 1e-12)
+        slope, _ = np.polyfit(log_f, log_p, 1)
+        return float(-slope)
+
+    # Train
+    for ep in range(10):
+        model.train()
+        idx = torch.randperm(X.shape[0], device=device)
+        for i in range(0, X.shape[0], 32):
+            j = idx[i:i + 32]
+            opt.zero_grad()
+            loss = F.mse_loss(model(X[j]), Y[j])
+            loss.backward(); opt.step()
+
+    # Measure β at each layer post-training
+    model.eval()
+    with torch.no_grad():
+        _ = model(X[:256])
+    betas_per_layer = [compute_beta(a) for a in model.activations]
+    return {
+        'seed': seed, 'depth': depth,
+        'betas_per_layer': betas_per_layer,
+        'beta_input': 0.0,  # Gaussian noise
+        'beta_layer_1': betas_per_layer[0] if betas_per_layer else None,
+        'beta_layer_last': betas_per_layer[-1] if betas_per_layer else None,
+    }
+
+
+@app.local_entrypoint()
+def depth_emergence():
+    """Test if β emerges with depth under Gaussian input."""
+    depths = [1, 2, 3, 5, 8]
+    seeds = list(range(6))
+    inputs = [(s, d) for d in depths for s in seeds]
+    results = list(train_beta_depth_gauss.starmap(inputs))
+
+    import statistics
+    print(f"\n=== β depth emergence under Gaussian input ===")
+    for d in depths:
+        runs = [r for r in results if r['depth'] == d]
+        last_layer_betas = [r['beta_layer_last'] for r in runs]
+        first_layer_betas = [r['beta_layer_1'] for r in runs]
+        print(f"  depth={d}")
+        print(f"    layer 1 β  : {statistics.mean(first_layer_betas):.3f} ± {statistics.stdev(first_layer_betas):.3f}")
+        print(f"    layer N β  : {statistics.mean(last_layer_betas):.3f} ± {statistics.stdev(last_layer_betas):.3f}")
+        # Trajectory per layer
+        per_layer = []
+        for layer_idx in range(d):
+            betas = [r['betas_per_layer'][layer_idx] for r in runs]
+            per_layer.append(round(statistics.mean(betas), 2))
+        print(f"    β trajectory : {per_layer}")
+
+
 @app.local_entrypoint()
 def signal_control():
     """Test if β=2.2 depends on input signal or is intrinsic to MLP architecture."""
