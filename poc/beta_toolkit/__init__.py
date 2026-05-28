@@ -8,12 +8,16 @@ Modules :
 """
 from .meter import compute_beta, sliding_beta, BetaAnomalyDetector
 from .synthesizer import ODESynthesizer, train_synthesizer
+from .finance import BetaRegimeDetector, BetaTrader, backtest
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = [
     "compute_beta",
     "sliding_beta",
     "BetaAnomalyDetector",
     "ODESynthesizer",
     "train_synthesizer",
+    "BetaRegimeDetector",
+    "BetaTrader",
+    "backtest",
 ]
