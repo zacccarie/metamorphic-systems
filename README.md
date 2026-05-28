@@ -108,6 +108,42 @@ metamorphic-systems/
 └── memory/                    notes intermédiaires
 ```
 
-## Status snapshot (init session 2026-05-28)
+## Status snapshot (2026-05-28)
 
-Repo créé. Inventory in progress.
+### Session cloud nuit 2026-05-28
+
+~700+ Modal A10 runs. Findings principaux :
+
+**Falsifications (7)** — voir `analysis/falsifications.md` :
+- F1 : architrace "1/f² universel SOC" INVALIDÉ (MLP passive filter)
+- F2 : ComplexNet "complex algebra essential" RÉFUTÉ (paired channels suffit)
+- F3 : Self-modeling naive utile RÉFUTÉ (val_acc invariant)
+- F4 : ODE rollout good RÉFUTÉ (67× pire MLP)
+- F5 : Anti-Bitter Lesson NUANCÉ (catch-up delay)
+- F6 : Complex algebra universal RÉFUTÉ (niche M4 strict)
+- F7 : MSE = InfoNCE aux loss RÉFUTÉ
+
+**Finding positif majeur** : β taxonomy architectures (voir `analysis/falsifications.md`)
+- MLP=0.05, ResNet=0.02 (passive)
+- RNN=0.21 (tanh saturé)
+- Attention=0.50 (partial mixing)
+- GRU=1.08, LSTM=1.17 (gated memory → pink)
+- **ODE Euler=1.57 ± 0.006** (integration scale)
+
+### PoC livrés (`poc/`)
+
+| PoC | Status | AUROC/result |
+|---|---|---|
+| β-meter raw signal | ✓ Validé | AUROC 0.78-0.99 (synth), 0.98 (dist shift) |
+| ODE β-controlled gen | ✓ Validé | β≈2.0 stable autoregressive rollout |
+| β-toolkit Python pkg | ✓ Functional | demo.py runs CPU 10s |
+| Web demo live | ✓ Functional | port 4633, canvas-based interactive |
+| Niche characterization | ✓ 7 anomaly types | excels regime+dist shift, blind to moments |
+
+### Figures publication
+
+- `poc/fig1_anomaly_detection.png` : sliding β + z-score on synthetic
+- `poc/fig2_ode_synthesizer.png` : training vs generated spectra
+- `poc/fig3_taxonomy_beta.png` : architecture bar chart β taxonomy
+- `poc/fig4_anomaly_types_robustness.png` : 7-panel detection by type
+- `poc/fig5_anomaly_types_summary.png` : AUROC niche summary
