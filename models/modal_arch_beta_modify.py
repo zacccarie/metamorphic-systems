@@ -139,6 +139,143 @@ def train_arch_beta(seed: int = 0, arch: str = "mlp") -> dict:
     return {'seed': seed, 'arch': arch, 'beta': beta, 'n_params': n_params}
 
 
+@app.function(image=image, gpu="A10", timeout=600)
+def train_recurrent_beta(seed: int = 0, arch: str = "gru") -> dict:
+    """Compare recurrent variants : gru, lstm, vanilla_rnn, ode_euler.
+
+    All trained under Gaussian noise input. Measure β activations.
+    """
+    import numpy as np
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+
+    device = torch.device("cuda")
+    rng = np.random.default_rng(seed)
+    n = 5000
+    # Same Gaussian setup as before
+    traj = rng.normal(0, 1, (n, 3)).astype(np.float32)
+    window = 8  # longer window to give recurrent more steps
+    X = np.stack([traj[i: i + window].flatten() for i in range(len(traj) - window - 1)])
+    Y = traj[window:window + len(X)]
+    X = torch.from_numpy(X[:1000]).to(device); Y = torch.from_numpy(Y[:1000]).to(device)
+
+    class GRU_Net(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.rnn = nn.GRU(input_size=3, hidden_size=64, num_layers=2, batch_first=True)
+            self.head = nn.Linear(64, 3)
+            self.last_act = None
+            self.window = window
+        def forward(self, x):
+            B = x.shape[0]
+            x = x.view(B, self.window, 3)
+            h, _ = self.rnn(x)
+            self.last_act = h.reshape(-1, h.shape[-1]).detach()
+            return self.head(h[:, -1])
+
+    class LSTM_Net(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.rnn = nn.LSTM(input_size=3, hidden_size=64, num_layers=2, batch_first=True)
+            self.head = nn.Linear(64, 3)
+            self.last_act = None
+            self.window = window
+        def forward(self, x):
+            B = x.shape[0]
+            x = x.view(B, self.window, 3)
+            h, _ = self.rnn(x)
+            self.last_act = h.reshape(-1, h.shape[-1]).detach()
+            return self.head(h[:, -1])
+
+    class VanillaRNN_Net(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.rnn = nn.RNN(input_size=3, hidden_size=64, num_layers=2, batch_first=True, nonlinearity='tanh')
+            self.head = nn.Linear(64, 3)
+            self.last_act = None
+            self.window = window
+        def forward(self, x):
+            B = x.shape[0]
+            x = x.view(B, self.window, 3)
+            h, _ = self.rnn(x)
+            self.last_act = h.reshape(-1, h.shape[-1]).detach()
+            return self.head(h[:, -1])
+
+    class ODEEuler_Net(nn.Module):
+        """Simple ODE-like : h_t = h_{t-1} + f(h_{t-1}, x_t)*dt"""
+        def __init__(self):
+            super().__init__()
+            self.window = window
+            self.f = nn.Sequential(nn.Linear(64 + 3, 64), nn.Tanh(), nn.Linear(64, 64))
+            self.proj_in = nn.Linear(3, 64)
+            self.head = nn.Linear(64, 3)
+            self.dt = 0.1
+            self.last_act = None
+        def forward(self, x):
+            B = x.shape[0]
+            x = x.view(B, self.window, 3)
+            h = torch.zeros(B, 64, device=x.device)
+            all_h = []
+            for t in range(self.window):
+                inp = torch.cat([h, x[:, t]], dim=-1)
+                h = h + self.dt * self.f(inp)
+                all_h.append(h)
+            all_h = torch.stack(all_h, dim=1)  # (B, T, 64)
+            self.last_act = all_h.reshape(-1, 64).detach()
+            return self.head(h)
+
+    factory = {'gru': GRU_Net, 'lstm': LSTM_Net, 'vanilla_rnn': VanillaRNN_Net, 'ode_euler': ODEEuler_Net}[arch]
+    torch.manual_seed(seed); np.random.seed(seed)
+    model = factory().to(device)
+    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+    def compute_beta(h):
+        h = h.cpu().numpy()
+        if h.shape[0] < 16:
+            return 0.0
+        fft = np.fft.rfft(h, axis=0)
+        power = (np.abs(fft) ** 2).mean(axis=1)
+        freqs = np.arange(1, len(power))
+        log_f = np.log(freqs + 1e-9)
+        log_p = np.log(power[1:] + 1e-12)
+        slope, _ = np.polyfit(log_f, log_p, 1)
+        return float(-slope)
+
+    for ep in range(10):
+        model.train()
+        idx = torch.randperm(X.shape[0], device=device)
+        for i in range(0, X.shape[0], 32):
+            j = idx[i:i + 32]
+            opt.zero_grad()
+            loss = F.mse_loss(model(X[j]), Y[j])
+            loss.backward(); opt.step()
+    model.eval()
+    with torch.no_grad():
+        _ = model(X[:256])
+        beta = compute_beta(model.last_act)
+    n_params = sum(p.numel() for p in model.parameters())
+    return {'seed': seed, 'arch': arch, 'beta': beta, 'n_params': n_params}
+
+
+@app.local_entrypoint()
+def recurrent_sweep():
+    archs = ['gru', 'lstm', 'vanilla_rnn', 'ode_euler']
+    seeds = list(range(8))
+    inputs = [(s, a) for a in archs for s in seeds]
+    results = list(train_recurrent_beta.starmap(inputs))
+
+    import statistics
+    print(f"\n=== β under Gaussian per recurrent variant ===")
+    for a in archs:
+        runs = [r for r in results if r['arch'] == a]
+        betas = [r['beta'] for r in runs]
+        ps = runs[0]['n_params']
+        m = statistics.mean(betas)
+        s = statistics.stdev(betas)
+        print(f"  {a:<14} : β = {m:.3f} ± {s:.3f}  params={ps}")
+
+
 @app.local_entrypoint()
 def arch_sweep():
     """4 archs × 8 seeds parallel."""
