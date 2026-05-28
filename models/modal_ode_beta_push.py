@@ -168,6 +168,93 @@ def train_ode_linear(seed: int = 0, n_steps: int = 64, dt: float = 0.05, nonlin:
     return {'seed': seed, 'n_steps': n_steps, 'dt': dt, 'nonlin': nonlin, 'beta': beta}
 
 
+@app.function(image=image, gpu="A10", timeout=900)
+def train_ode_large(seed: int = 0, hidden: int = 256, n_steps: int = 256, dt: float = 0.01) -> dict:
+    """Push ODE Euler to large config to test β=1.85 architrace plausibility."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+
+    device = torch.device("cuda")
+    rng = np.random.default_rng(seed)
+    n = 8000
+    traj = rng.normal(0, 1, (n, 3)).astype(np.float32)
+    window = n_steps
+    X = np.stack([traj[i: i + window].flatten() for i in range(min(800, len(traj) - window - 1))])
+    Y = traj[window:window + len(X)]
+    X = torch.from_numpy(X[:300]).to(device); Y = torch.from_numpy(Y[:300]).to(device)
+
+    class ODE(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.window = n_steps
+            self.dt = dt
+            self.f = nn.Sequential(nn.Linear(hidden + 3, hidden), nn.Tanh(), nn.Linear(hidden, hidden))
+            self.head = nn.Linear(hidden, 3)
+            self.last_act = None
+        def forward(self, x):
+            B = x.shape[0]
+            x = x.view(B, self.window, 3)
+            h = torch.zeros(B, hidden, device=x.device)
+            all_h = []
+            for t in range(self.window):
+                inp = torch.cat([h, x[:, t]], dim=-1)
+                h = h + self.dt * self.f(inp)
+                all_h.append(h)
+            all_h = torch.stack(all_h, dim=1)
+            self.last_act = all_h.reshape(-1, hidden).detach()
+            return self.head(h)
+
+    torch.manual_seed(seed); np.random.seed(seed)
+    model = ODE().to(device)
+    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+    def compute_beta(h):
+        h = h.cpu().numpy()
+        if h.shape[0] < 32:
+            return 0.0
+        fft = np.fft.rfft(h, axis=0)
+        power = (np.abs(fft) ** 2).mean(axis=1)
+        freqs = np.arange(1, len(power))
+        log_f = np.log(freqs + 1e-9)
+        log_p = np.log(power[1:] + 1e-12)
+        slope, _ = np.polyfit(log_f, log_p, 1)
+        return float(-slope)
+
+    for ep in range(4):  # very few epochs (window=256 is heavy)
+        model.train()
+        idx = torch.randperm(X.shape[0], device=device)
+        for i in range(0, X.shape[0], 16):
+            j = idx[i:i + 16]
+            opt.zero_grad()
+            loss = F.mse_loss(model(X[j]), Y[j])
+            loss.backward(); opt.step()
+    model.eval()
+    with torch.no_grad():
+        _ = model(X[:32])
+        beta = compute_beta(model.last_act)
+    return {'seed': seed, 'hidden': hidden, 'n_steps': n_steps, 'beta': beta}
+
+
+@app.local_entrypoint()
+def large_ode_test():
+    """Test if large ODE reaches architrace β=1.85."""
+    seeds = list(range(4))
+    inputs = [(s, 256, 256, 0.01) for s in seeds]
+    results = list(train_ode_large.starmap(inputs))
+
+    import statistics
+    print(f"\n=== ODE large (hidden=256, n_steps=256) ===")
+    betas = [r['beta'] for r in results]
+    print(f"  β = {statistics.mean(betas):.3f} ± {statistics.stdev(betas):.3f}")
+    print(f"  raw : {[round(b, 3) for b in betas]}")
+    target = 1.85
+    diff = abs(statistics.mean(betas) - target)
+    verdict = "architrace_reproduced" if diff < 0.2 else "not_quite_architrace"
+    print(f"  vs architrace 1.85 : Δ={diff:.3f} → {verdict}")
+
+
 @app.local_entrypoint()
 def nonlin_test():
     """Test β with different f nonlinearities."""
