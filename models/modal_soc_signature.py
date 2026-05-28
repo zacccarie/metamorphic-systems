@@ -22,6 +22,134 @@ image = (
 
 
 @app.function(image=image, gpu="A10", timeout=600)
+def train_track_beta_signal(seed: int = 0, signal_type: str = "lorenz") -> dict:
+    """Control : track β with different input signals.
+
+    signal_type :
+    - lorenz : chaotic dynamics (test précédent)
+    - gaussian : random noise
+    - sine : pure sinusoid
+    - pink : 1/f noise (already has β=1)
+    """
+    import numpy as np
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+
+    device = torch.device("cuda")
+
+    def make_data(signal_type, n=5000, seed=0):
+        rng = np.random.default_rng(seed)
+        if signal_type == "lorenz":
+            xs = np.zeros((n, 3), dtype=np.float64)
+            xs[0] = [1.0, 1.0, 1.0]
+            for i in range(1, n):
+                x, y, z = xs[i - 1]
+                xs[i, 0] = x + 0.01 * 10 * (y - x)
+                xs[i, 1] = y + 0.01 * (x * (28 - z) - y)
+                xs[i, 2] = z + 0.01 * (x * y - 8 / 3 * z)
+            return xs.astype(np.float32)
+        elif signal_type == "gaussian":
+            return rng.normal(0, 1, (n, 3)).astype(np.float32)
+        elif signal_type == "sine":
+            t = np.linspace(0, 100, n)
+            return np.stack([
+                np.sin(2 * np.pi * 0.5 * t),
+                np.sin(2 * np.pi * 1.3 * t),
+                np.sin(2 * np.pi * 2.1 * t),
+            ], axis=1).astype(np.float32)
+        elif signal_type == "pink":
+            # 1/f noise via filtered random walk
+            white = rng.normal(0, 1, (n, 3))
+            pink = np.zeros_like(white)
+            pink[0] = white[0]
+            for i in range(1, n):
+                pink[i] = 0.99 * pink[i - 1] + white[i]
+            return pink.astype(np.float32)
+        else:
+            raise ValueError(signal_type)
+
+    traj = make_data(signal_type, 5000, seed=seed)
+    mu, std = traj.mean(0), traj.std(0) + 1e-6
+    traj = (traj - mu) / std
+
+    window = 4
+    X = np.stack([traj[i: i + window].flatten() for i in range(len(traj) - window - 1)])
+    Y = traj[window:window + len(X)]
+    X = torch.from_numpy(X[:1000]).to(device); Y = torch.from_numpy(Y[:1000]).to(device)
+
+    class MLP(nn.Module):
+        def __init__(self, in_d, h, out_d, depth=3):
+            super().__init__()
+            layers = []
+            d_in = in_d
+            for _ in range(depth):
+                layers.append(nn.Linear(d_in, h))
+                layers.append(nn.GELU())
+                d_in = h
+            layers.append(nn.Linear(h, out_d))
+            self.net = nn.Sequential(*layers)
+            self.activations = []
+        def forward(self, x):
+            self.activations.clear()
+            h = x
+            for layer in self.net:
+                h = layer(h)
+                if isinstance(layer, nn.GELU):
+                    self.activations.append(h.detach())
+            return h
+
+    torch.manual_seed(seed); np.random.seed(seed)
+    model = MLP(12, 64, 3, depth=3).to(device)
+    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+    def compute_beta(activations):
+        if not activations or activations[0].shape[0] < 16:
+            return 0.0
+        h = activations[0].cpu().numpy()
+        fft = np.fft.rfft(h, axis=0)
+        power = (np.abs(fft) ** 2).mean(axis=1)
+        freqs = np.arange(1, len(power))
+        log_f = np.log(freqs + 1e-9)
+        log_p = np.log(power[1:] + 1e-12)
+        slope, _ = np.polyfit(log_f, log_p, 1)
+        return float(-slope)
+
+    # Also β on input signal directly (sanity)
+    fft_in = np.fft.rfft(traj[:128], axis=0)
+    power_in = (np.abs(fft_in) ** 2).mean(axis=1)
+    freqs_in = np.arange(1, len(power_in))
+    log_f_in = np.log(freqs_in + 1e-9)
+    log_p_in = np.log(power_in[1:] + 1e-12)
+    slope_in, _ = np.polyfit(log_f_in, log_p_in, 1)
+    beta_input_signal = float(-slope_in)
+
+    betas = []
+    for ep in range(15):
+        model.train()
+        idx = torch.randperm(X.shape[0], device=device)
+        for i in range(0, X.shape[0], 32):
+            j = idx[i:i + 32]
+            opt.zero_grad()
+            loss = F.mse_loss(model(X[j]), Y[j])
+            loss.backward()
+            opt.step()
+        model.eval()
+        with torch.no_grad():
+            _ = model(X[:128])
+            beta = compute_beta(model.activations)
+        betas.append(beta)
+
+    return {
+        'seed': seed, 'signal_type': signal_type,
+        'beta_input_signal': beta_input_signal,
+        'beta_activations_init': betas[0],
+        'beta_activations_final': betas[-1],
+        'beta_activations_mean': float(sum(betas) / len(betas)),
+    }
+
+
+@app.function(image=image, gpu="A10", timeout=600)
 def train_track_beta(seed: int = 0, depth: int = 3) -> dict:
     """Train MLP, track β spectral slope every epoch."""
     import numpy as np
@@ -131,6 +259,27 @@ def train_track_beta(seed: int = 0, depth: int = 3) -> dict:
         'beta_converged': float(np.mean(betas[-5:])),
         'loss_final': losses[-1],
     }
+
+
+@app.local_entrypoint()
+def signal_control():
+    """Test if β=2.2 depends on input signal or is intrinsic to MLP architecture."""
+    signals = ['lorenz', 'gaussian', 'sine', 'pink']
+    seeds = list(range(6))
+    inputs = [(s, sig) for sig in signals for s in seeds]
+    results = list(train_track_beta_signal.starmap(inputs))
+
+    import statistics
+    print(f"\n=== β spectral signal control ===")
+    print(f"  {'signal':<12} {'β input':<12} {'β act init':<14} {'β act final':<14}")
+    for sig in signals:
+        runs = [r for r in results if r['signal_type'] == sig]
+        b_in = [r['beta_input_signal'] for r in runs]
+        b_init = [r['beta_activations_init'] for r in runs]
+        b_fin = [r['beta_activations_final'] for r in runs]
+        print(f"  {sig:<12} {statistics.mean(b_in):.3f}      "
+              f"{statistics.mean(b_init):.3f}±{statistics.stdev(b_init):.3f}  "
+              f"{statistics.mean(b_fin):.3f}±{statistics.stdev(b_fin):.3f}")
 
 
 @app.local_entrypoint()
