@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>β-synthesizer 3D — ODE Euler trajectories</title>
+<style>
+  :root {
+    --bg: #000000;
+    --normal: #00ff9f;
+    --beta: #ffaa00;
+    --highlight: #ff00ff;
+    --text: #ffffff;
+    --muted: #777777;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Menlo', 'Monaco', monospace;
+    overflow: hidden;
+    height: 100vh;
+    width: 100vw;
+  }
+  #canvas-container {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+  }
+  canvas { display: block; }
+  #ui {
+    position: absolute;
+    top: 24px;
+    left: 24px;
+    z-index: 10;
+    max-width: 420px;
+    pointer-events: none;
+  }
+  #ui h1 {
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    margin-bottom: 4px;
+  }
+  #ui h1 .greek { color: var(--highlight); }
+  #ui .subtitle { color: var(--muted); font-size: 12px; }
+  #controls {
+    position: absolute;
+    top: 24px;
+    right: 24px;
+    width: 280px;
+    background: rgba(5,5,5,0.85);
+    backdrop-filter: blur(8px);
+    border: 1px solid #1a1a1a;
+    border-radius: 4px;
+    padding: 16px;
+    z-index: 10;
+    font-size: 12px;
+  }
+  .ctl-title {
+    font-size: 10px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-bottom: 8px;
+  }
+  .ctl-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .ctl-row label { color: var(--muted); width: 70px; font-size: 11px; }
+  .ctl-row input[type="range"] { flex: 1; accent-color: var(--highlight); }
+  .ctl-row .val { color: var(--text); font-weight: 600; min-width: 40px; text-align: right; font-size: 11px; }
+  .stat-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 5px 0;
+    border-bottom: 1px solid #181818;
+    font-size: 11px;
+  }
+  .stat-row:last-child { border-bottom: none; }
+  .stat-row .label { color: var(--muted); }
+  .stat-row .val { color: var(--normal); font-weight: 600; }
+  button {
+    background: #1a1a1a;
+    color: var(--text);
+    border: 1px solid #333;
+    padding: 6px 10px;
+    border-radius: 3px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 11px;
+    width: 100%;
+    margin-top: 8px;
+  }
+  button:hover { background: #222; border-color: var(--highlight); }
+  #footer {
+    position: absolute;
+    bottom: 16px;
+    left: 0;
+    right: 0;
+    text-align: center;
+    color: var(--muted);
+    font-size: 10px;
+    z-index: 10;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+  <div id="canvas-container"></div>
+  <div id="ui">
+    <h1><span class="greek">β</span>-synthesizer 3D · ODE Euler trajectory</h1>
+    <div class="subtitle">autoregressive rollout produit β ≈ 2.0 stable · metamorphic-systems</div>
+  </div>
+  <div id="controls">
+    <div class="ctl-title">ODE parameters</div>
+    <div class="ctl-row">
+      <label>dt</label>
+      <input id="dtSlider" type="range" min="0.001" max="0.05" step="0.001" value="0.01">
+      <div class="val" id="dtVal">0.010</div>
+    </div>
+    <div class="ctl-row">
+      <label>ρ (lorenz)</label>
+      <input id="rhoSlider" type="range" min="0" max="60" step="0.5" value="28">
+      <div class="val" id="rhoVal">28</div>
+    </div>
+    <div class="ctl-row">
+      <label>σ (sigma)</label>
+      <input id="sigmaSlider" type="range" min="0" max="30" step="0.5" value="10">
+      <div class="val" id="sigmaVal">10</div>
+    </div>
+    <div class="ctl-row">
+      <label>β (beta)</label>
+      <input id="betaSlider" type="range" min="0" max="10" step="0.05" value="2.67">
+      <div class="val" id="betaValCtl">2.67</div>
+    </div>
+
+    <div class="ctl-title" style="margin-top:14px">measurements</div>
+    <div class="stat-row"><span class="label">β X-axis</span><span class="val" id="betaX">—</span></div>
+    <div class="stat-row"><span class="label">β Y-axis</span><span class="val" id="betaY">—</span></div>
+    <div class="stat-row"><span class="label">β Z-axis</span><span class="val" id="betaZ">—</span></div>
+    <div class="stat-row"><span class="label">points</span><span class="val" id="ptCount">—</span></div>
+
+    <button id="reset">Reset trajectory</button>
+    <button id="randomize">Randomize params</button>
+  </div>
+  <div id="footer">
+    Lorenz attractor · β finding from 700+ Modal A10 runs · drag to orbit · scroll to zoom
+  </div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+const container = document.getElementById('canvas-container');
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x000000, 0.008);
+
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+camera.position.set(40, 40, 80);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.2;
+container.appendChild(renderer.domElement);
+
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.7, 0.5, 0.15);
+composer.addPass(bloom);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+
+// === Lorenz state ===
+const MAX_POINTS = 8000;
+const positions = new Float32Array(MAX_POINTS * 3);
+const colors = new Float32Array(MAX_POINTS * 3);
+let pointCount = 0;
+let writeIdx = 0;
+
+const params = {
+  dt: 0.01,
+  rho: 28,
+  sigma: 10,
+  beta: 2.67,
+  state: [1.0, 1.0, 1.0],
+};
+
+const traceGeometry = new THREE.BufferGeometry();
+traceGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+traceGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+traceGeometry.setDrawRange(0, 0);
+
+const traceMaterial = new THREE.LineBasicMaterial({
+  vertexColors: true,
+  transparent: true,
+  opacity: 0.85,
+  linewidth: 1,
+});
+const trace = new THREE.Line(traceGeometry, traceMaterial);
+scene.add(trace);
+
+// Head particle
+const headGeometry = new THREE.SphereGeometry(0.6, 16, 16);
+const headMaterial = new THREE.MeshBasicMaterial({ color: 0xff00ff });
+const head = new THREE.Mesh(headGeometry, headMaterial);
+scene.add(head);
+
+// Add a glow particle system around the head
+const glowGeometry = new THREE.SphereGeometry(1.5, 16, 16);
+const glowMaterial = new THREE.MeshBasicMaterial({ color: 0xff00ff, transparent: true, opacity: 0.25 });
+const glow = new THREE.Mesh(glowGeometry, glowMaterial);
+scene.add(glow);
+
+// Grid floor
+const grid = new THREE.GridHelper(80, 16, 0x222222, 0x111111);
+grid.position.y = -30;
+scene.add(grid);
+
+// === Color mapping ===
+function colorFromVelocity(vx, vy, vz) {
+  const v = Math.sqrt(vx * vx + vy * vy + vz * vz);
+  const t = Math.min(v / 30, 1);
+  // mint → amber → magenta
+  if (t < 0.5) {
+    const tt = t * 2;
+    return [
+      0.0 * (1 - tt) + 1.0 * tt,   // R : 0 → 1
+      1.0,                          // G
+      0.6 * (1 - tt) + 0.0 * tt,   // B : 0.6 → 0
+    ];
+  } else {
+    const tt = (t - 0.5) * 2;
+    return [
+      1.0,                          // R
+      1.0 * (1 - tt) + 0.0 * tt,   // G : 1 → 0
+      0.0 * (1 - tt) + 1.0 * tt,   // B : 0 → 1
+    ];
+  }
+}
+
+function stepLorenz() {
+  const [x, y, z] = params.state;
+  const dx = params.sigma * (y - x);
+  const dy = x * (params.rho - z) - y;
+  const dz = x * y - params.beta * z;
+  const nx = x + params.dt * dx;
+  const ny = y + params.dt * dy;
+  const nz = z + params.dt * dz;
+  if (!isFinite(nx) || !isFinite(ny) || !isFinite(nz)) {
+    params.state = [1.0, 1.0, 1.0];
+    return;
+  }
+  params.state = [nx, ny, nz];
+
+  // Append to circular buffer
+  const i3 = writeIdx * 3;
+  positions[i3] = nx;
+  positions[i3 + 1] = nz - 25;  // center z around 0
+  positions[i3 + 2] = ny;
+
+  const [r, g, b] = colorFromVelocity(dx, dy, dz);
+  colors[i3] = r;
+  colors[i3 + 1] = g;
+  colors[i3 + 2] = b;
+
+  writeIdx = (writeIdx + 1) % MAX_POINTS;
+  pointCount = Math.min(pointCount + 1, MAX_POINTS);
+
+  // Update head
+  head.position.set(nx, nz - 25, ny);
+  glow.position.set(nx, nz - 25, ny);
+}
+
+function rebuildLineArray() {
+  // Reconstruct linear array from circular buffer for line draw
+  if (pointCount < MAX_POINTS) {
+    traceGeometry.setDrawRange(0, pointCount);
+  } else {
+    // Reorder so that line starts from oldest
+    const tmpPos = new Float32Array(MAX_POINTS * 3);
+    const tmpCol = new Float32Array(MAX_POINTS * 3);
+    for (let i = 0; i < MAX_POINTS; i++) {
+      const src = (writeIdx + i) % MAX_POINTS;
+      tmpPos[i * 3] = positions[src * 3];
+      tmpPos[i * 3 + 1] = positions[src * 3 + 1];
+      tmpPos[i * 3 + 2] = positions[src * 3 + 2];
+      tmpCol[i * 3] = colors[src * 3];
+      tmpCol[i * 3 + 1] = colors[src * 3 + 1];
+      tmpCol[i * 3 + 2] = colors[src * 3 + 2];
+    }
+    positions.set(tmpPos);
+    colors.set(tmpCol);
+    writeIdx = 0;
+    traceGeometry.setDrawRange(0, MAX_POINTS);
+  }
+  traceGeometry.attributes.position.needsUpdate = true;
+  traceGeometry.attributes.color.needsUpdate = true;
+}
+
+// === β computation ===
+function computeBetaFFT(samples) {
+  const N = 256;
+  if (samples.length < N) return null;
+  const real = new Float64Array(N);
+  const imag = new Float64Array(N);
+  for (let i = 0; i < N; i++) real[i] = samples[samples.length - N + i];
+
+  // FFT (Cooley-Tukey iterative)
+  for (let i = 1, j = 0; i < N; i++) {
+    let bit = N >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      [real[i], real[j]] = [real[j], real[i]];
+      [imag[i], imag[j]] = [imag[j], imag[i]];
+    }
+  }
+  for (let len = 2; len <= N; len <<= 1) {
+    const ang = -2 * Math.PI / len;
+    const wRealStep = Math.cos(ang);
+    const wImagStep = Math.sin(ang);
+    for (let i = 0; i < N; i += len) {
+      let wR = 1, wI = 0;
+      for (let k = 0; k < len / 2; k++) {
+        const uR = real[i + k], uI = imag[i + k];
+        const vR = real[i + k + len / 2] * wR - imag[i + k + len / 2] * wI;
+        const vI = real[i + k + len / 2] * wI + imag[i + k + len / 2] * wR;
+        real[i + k] = uR + vR;
+        imag[i + k] = uI + vI;
+        real[i + k + len / 2] = uR - vR;
+        imag[i + k + len / 2] = uI - vI;
+        const nR = wR * wRealStep - wI * wImagStep;
+        wI = wR * wImagStep + wI * wRealStep;
+        wR = nR;
+      }
+    }
+  }
+  const half = N / 2;
+  let sX = 0, sY = 0, sXY = 0, sX2 = 0, n = 0;
+  for (let i = 1; i < half; i++) {
+    const lf = Math.log(i);
+    const lp = Math.log(real[i] * real[i] + imag[i] * imag[i] + 1e-12);
+    sX += lf; sY += lp; sXY += lf * lp; sX2 += lf * lf; n++;
+  }
+  const slope = (n * sXY - sX * sY) / (n * sX2 - sX * sX);
+  return -slope;
+}
+
+// Sample buffers for β computation
+const sampleBufX = [];
+const sampleBufY = [];
+const sampleBufZ = [];
+const MAX_SAMPLES = 600;
+
+function updateBetaDisplay() {
+  if (sampleBufX.length < 256) return;
+  const bX = computeBetaFFT(sampleBufX);
+  const bY = computeBetaFFT(sampleBufY);
+  const bZ = computeBetaFFT(sampleBufZ);
+  if (bX !== null) document.getElementById('betaX').textContent = bX.toFixed(2);
+  if (bY !== null) document.getElementById('betaY').textContent = bY.toFixed(2);
+  if (bZ !== null) document.getElementById('betaZ').textContent = bZ.toFixed(2);
+  document.getElementById('ptCount').textContent = pointCount;
+}
+
+// === UI handlers ===
+function setupSlider(id, valId, key, fmt = (v) => v.toFixed(2)) {
+  const el = document.getElementById(id);
+  const val = document.getElementById(valId);
+  el.addEventListener('input', (e) => {
+    params[key] = parseFloat(e.target.value);
+    val.textContent = fmt(params[key]);
+  });
+}
+
+setupSlider('dtSlider', 'dtVal', 'dt', (v) => v.toFixed(3));
+setupSlider('rhoSlider', 'rhoVal', 'rho', (v) => v.toFixed(1));
+setupSlider('sigmaSlider', 'sigmaVal', 'sigma', (v) => v.toFixed(1));
+setupSlider('betaSlider', 'betaValCtl', 'beta', (v) => v.toFixed(2));
+
+document.getElementById('reset').addEventListener('click', () => {
+  pointCount = 0;
+  writeIdx = 0;
+  params.state = [1.0, 1.0, 1.0];
+  sampleBufX.length = 0;
+  sampleBufY.length = 0;
+  sampleBufZ.length = 0;
+  traceGeometry.setDrawRange(0, 0);
+});
+
+document.getElementById('randomize').addEventListener('click', () => {
+  params.rho = 20 + Math.random() * 30;
+  params.sigma = 5 + Math.random() * 15;
+  params.beta = 1 + Math.random() * 5;
+  document.getElementById('rhoSlider').value = params.rho;
+  document.getElementById('rhoVal').textContent = params.rho.toFixed(1);
+  document.getElementById('sigmaSlider').value = params.sigma;
+  document.getElementById('sigmaVal').textContent = params.sigma.toFixed(1);
+  document.getElementById('betaSlider').value = params.beta;
+  document.getElementById('betaValCtl').textContent = params.beta.toFixed(2);
+});
+
+// === Animation loop ===
+let frameCount = 0;
+function animate() {
+  requestAnimationFrame(animate);
+
+  // Multiple Lorenz steps per frame for fluidity
+  for (let s = 0; s < 4; s++) {
+    stepLorenz();
+    sampleBufX.push(params.state[0]);
+    sampleBufY.push(params.state[1]);
+    sampleBufZ.push(params.state[2]);
+    if (sampleBufX.length > MAX_SAMPLES) { sampleBufX.shift(); sampleBufY.shift(); sampleBufZ.shift(); }
+  }
+  rebuildLineArray();
+
+  if (frameCount % 30 === 0) updateBetaDisplay();
+  frameCount++;
+
+  // Pulse glow
+  const pulse = 1 + 0.3 * Math.sin(frameCount * 0.05);
+  glow.scale.setScalar(pulse);
+
+  controls.update();
+  composer.render();
+}
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  composer.setSize(window.innerWidth, window.innerHeight);
+});
+
+animate();
+</script>
+</body>
+</html>
