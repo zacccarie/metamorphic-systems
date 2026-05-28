@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>β-meter — spectral anomaly detection</title>
+<style>
+  :root {
+    --bg: #000000;
+    --signal: #88ccff;
+    --beta: #ffaa00;
+    --normal: #00ff9f;
+    --anomaly: #ff3366;
+    --highlight: #ff00ff;
+    --text: #ffffff;
+    --muted: #777777;
+    --grid: #222222;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Menlo', 'Monaco', monospace;
+    overflow: hidden;
+    height: 100vh;
+  }
+  body { display: grid; grid-template-rows: auto 1fr auto; padding: 24px; gap: 16px; }
+  header { display: flex; justify-content: space-between; align-items: baseline; }
+  h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.02em; }
+  h1 .greek { color: var(--highlight); }
+  header .subtitle { color: var(--muted); font-size: 12px; }
+  main {
+    display: grid;
+    grid-template-columns: 1fr 320px;
+    gap: 16px;
+    height: 100%;
+    overflow: hidden;
+  }
+  .panel {
+    background: #050505;
+    border: 1px solid #1a1a1a;
+    border-radius: 4px;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .panel-title {
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+  canvas { width: 100%; flex: 1; min-height: 0; }
+  #plotArea { display: grid; grid-template-rows: 1fr 1fr 1fr; gap: 12px; }
+  .control { display: flex; align-items: center; gap: 12px; font-size: 12px; }
+  .control label { color: var(--muted); width: 90px; }
+  .control input[type="range"] { flex: 1; accent-color: var(--highlight); }
+  .control .value { color: var(--text); font-weight: 600; min-width: 48px; text-align: right; }
+  .stat {
+    display: flex;
+    justify-content: space-between;
+    padding: 8px 10px;
+    background: #0a0a0a;
+    border-radius: 3px;
+    font-size: 13px;
+  }
+  .stat .label { color: var(--muted); }
+  .stat .val { font-weight: 600; }
+  .stat .val.normal { color: var(--normal); }
+  .stat .val.warn { color: var(--beta); }
+  .stat .val.anom { color: var(--anomaly); }
+  button {
+    background: #1a1a1a;
+    color: var(--text);
+    border: 1px solid #333;
+    padding: 6px 12px;
+    border-radius: 3px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 11px;
+  }
+  button:hover { background: #222; border-color: var(--highlight); }
+  button.active { background: var(--highlight); color: #000; border-color: var(--highlight); }
+  .button-row { display: flex; gap: 6px; flex-wrap: wrap; }
+  footer { font-size: 10px; color: var(--muted); text-align: center; }
+</style>
+</head>
+<body>
+  <header>
+    <h1><span class="greek">β</span>-meter <span style="color:var(--muted)">·</span> live spectral anomaly detector</h1>
+    <div class="subtitle">from metamorphic-systems research · 700+ Modal A10 runs</div>
+  </header>
+  <main>
+    <div id="plotArea">
+      <div class="panel">
+        <div class="panel-title">signal · 1/f^β colored noise · scrolling</div>
+        <canvas id="signalCanvas"></canvas>
+      </div>
+      <div class="panel">
+        <div class="panel-title">spectral slope β · sliding window 64</div>
+        <canvas id="betaCanvas"></canvas>
+      </div>
+      <div class="panel">
+        <div class="panel-title">anomaly score z = |β − baseline| / σ</div>
+        <canvas id="scoreCanvas"></canvas>
+      </div>
+    </div>
+    <aside class="panel" style="gap:12px">
+      <div class="panel-title">controls</div>
+      <div class="control">
+        <label>signal β</label>
+        <input id="betaSlider" type="range" min="0" max="3" step="0.05" value="0.5">
+        <div class="value" id="betaSliderVal">0.50</div>
+      </div>
+      <div class="control">
+        <label>noise σ</label>
+        <input id="noiseSlider" type="range" min="0" max="2" step="0.1" value="0.0">
+        <div class="value" id="noiseSliderVal">0.0</div>
+      </div>
+      <div class="panel-title" style="margin-top:8px">inject anomaly</div>
+      <div class="button-row">
+        <button data-anom="spike">Spike</button>
+        <button data-anom="regime">β regime</button>
+        <button data-anom="dist">Distribution</button>
+        <button data-anom="freq">Sine inject</button>
+      </div>
+      <div class="panel-title" style="margin-top:8px">stats</div>
+      <div class="stat"><span class="label">baseline β</span><span class="val normal" id="baselineVal">—</span></div>
+      <div class="stat"><span class="label">current β</span><span class="val" id="currentBetaVal">—</span></div>
+      <div class="stat"><span class="label">z-score</span><span class="val" id="zVal">—</span></div>
+      <div class="stat"><span class="label">status</span><span class="val" id="statusVal">collecting</span></div>
+      <div class="panel-title" style="margin-top:8px">actions</div>
+      <div class="button-row">
+        <button id="refit">Refit baseline</button>
+        <button id="pause">Pause</button>
+      </div>
+    </aside>
+  </main>
+  <footer>
+    β-toolkit · open-source · derived from architecture taxonomy finding β: MLP=0 / Attention=0.5 / GRU=1.08 / LSTM=1.17 / ODE Euler=1.57
+  </footer>
+
+<script>
+// === Signal generation : 1/f^β colored noise ===
+function gaussian() {
+  // Box-Muller
+  let u = 0, v = 0;
+  while (u === 0) u = Math.random();
+  while (v === 0) v = Math.random();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
+class ColoredNoiseGenerator {
+  constructor(beta = 0.5, bufSize = 1024) {
+    this.beta = beta;
+    this.bufSize = bufSize;
+    this.history = new Float32Array(bufSize);
+    this.idx = 0;
+    this.regenerate();
+  }
+  regenerate() {
+    // Generate white noise, transform via FFT to colored
+    const N = this.bufSize;
+    const white = new Float32Array(N);
+    for (let i = 0; i < N; i++) white[i] = gaussian();
+    // Simple AR(1) approximation : x_n = phi * x_{n-1} + noise
+    // phi controls correlation, beta correlates with depth of memory
+    // Approximation : higher beta = stronger correlation
+    const phi = Math.min(0.99, Math.exp(-1 / Math.max(1, 4 * this.beta)));
+    let prev = 0;
+    for (let i = 0; i < N; i++) {
+      prev = phi * prev + Math.sqrt(1 - phi * phi) * white[i];
+      this.history[i] = prev;
+    }
+    // Cumulative integration for high beta
+    if (this.beta > 1.5) {
+      let acc = 0;
+      for (let i = 0; i < N; i++) {
+        acc += 0.05 * this.history[i];
+        this.history[i] = acc;
+      }
+    }
+    // Normalize
+    let mean = 0, std = 0;
+    for (let i = 0; i < N; i++) mean += this.history[i];
+    mean /= N;
+    for (let i = 0; i < N; i++) std += (this.history[i] - mean) ** 2;
+    std = Math.sqrt(std / N) + 1e-9;
+    for (let i = 0; i < N; i++) this.history[i] = (this.history[i] - mean) / std;
+    this.idx = 0;
+  }
+  next() {
+    const v = this.history[this.idx];
+    this.idx++;
+    if (this.idx >= this.bufSize) this.regenerate();
+    return v;
+  }
+}
+
+// === FFT (simple Cooley-Tukey for power-of-2 sizes) ===
+function fft(real, imag) {
+  const N = real.length;
+  if (N <= 1) return;
+  // Bit-reversal
+  for (let i = 1, j = 0; i < N; i++) {
+    let bit = N >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      [real[i], real[j]] = [real[j], real[i]];
+      [imag[i], imag[j]] = [imag[j], imag[i]];
+    }
+  }
+  for (let len = 2; len <= N; len <<= 1) {
+    const ang = -2 * Math.PI / len;
+    const wRealStep = Math.cos(ang);
+    const wImagStep = Math.sin(ang);
+    for (let i = 0; i < N; i += len) {
+      let wReal = 1, wImag = 0;
+      for (let k = 0; k < len / 2; k++) {
+        const uR = real[i + k], uI = imag[i + k];
+        const vR = real[i + k + len / 2] * wReal - imag[i + k + len / 2] * wImag;
+        const vI = real[i + k + len / 2] * wImag + imag[i + k + len / 2] * wReal;
+        real[i + k] = uR + vR;
+        imag[i + k] = uI + vI;
+        real[i + k + len / 2] = uR - vR;
+        imag[i + k + len / 2] = uI - vI;
+        const nR = wReal * wRealStep - wImag * wImagStep;
+        wImag = wReal * wImagStep + wImag * wRealStep;
+        wReal = nR;
+      }
+    }
+  }
+}
+
+function computeBeta(samples) {
+  // Pad to next power of 2
+  const N = 64;  // fixed window
+  const real = new Float64Array(N);
+  const imag = new Float64Array(N);
+  for (let i = 0; i < Math.min(N, samples.length); i++) real[i] = samples[i];
+  fft(real, imag);
+  // Power spectrum
+  const half = N / 2;
+  const power = new Float64Array(half);
+  for (let i = 1; i < half; i++) {
+    power[i] = real[i] * real[i] + imag[i] * imag[i];
+  }
+  // log-log fit slope
+  let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+  let n = 0;
+  for (let i = 1; i < half; i++) {
+    const lf = Math.log(i);
+    const lp = Math.log(power[i] + 1e-12);
+    sumX += lf;
+    sumY += lp;
+    sumXY += lf * lp;
+    sumX2 += lf * lf;
+    n++;
+  }
+  const slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+  return -slope;
+}
+
+// === State ===
+const SIGNAL_HISTORY = 800;
+const BETA_HISTORY = 200;
+const BASELINE_SAMPLES = 200;
+
+const state = {
+  generator: new ColoredNoiseGenerator(0.5),
+  signal: new Float32Array(SIGNAL_HISTORY),
+  signalIdx: 0,
+  betaHistory: [],
+  scoreHistory: [],
+  baseline: null,
+  baselineStd: null,
+  baselineCollect: [],
+  noiseSigma: 0.0,
+  anomalyMode: null,
+  anomalyTicks: 0,
+  paused: false,
+  beta: 0.5,
+};
+
+function pushSignal(v) {
+  // Circular buffer
+  state.signal[state.signalIdx] = v;
+  state.signalIdx = (state.signalIdx + 1) % SIGNAL_HISTORY;
+}
+
+function getSignalArray() {
+  // Linear array in order
+  const out = new Float32Array(SIGNAL_HISTORY);
+  for (let i = 0; i < SIGNAL_HISTORY; i++) {
+    out[i] = state.signal[(state.signalIdx + i) % SIGNAL_HISTORY];
+  }
+  return out;
+}
+
+// === Canvas drawing ===
+function drawSignal(ctx, w, h) {
+  ctx.fillStyle = '#050505';
+  ctx.fillRect(0, 0, w, h);
+
+  // Anomaly shading for last 100 samples
+  const ticksRecent = state.anomalyTicks;
+  if (ticksRecent > 0) {
+    ctx.fillStyle = 'rgba(255, 51, 102, 0.08)';
+    const xStart = w * (1 - Math.min(ticksRecent, 100) / SIGNAL_HISTORY);
+    ctx.fillRect(xStart, 0, w - xStart, h);
+  }
+
+  // Grid
+  ctx.strokeStyle = '#1a1a1a';
+  ctx.lineWidth = 0.5;
+  for (let i = 1; i < 4; i++) {
+    const y = (h * i) / 4;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(w, y);
+    ctx.stroke();
+  }
+
+  const arr = getSignalArray();
+  // Auto-scale
+  let mx = 0;
+  for (let i = 0; i < arr.length; i++) mx = Math.max(mx, Math.abs(arr[i]));
+  mx = Math.max(mx, 1);
+
+  ctx.strokeStyle = '#88ccff';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 0; i < arr.length; i++) {
+    const x = (w * i) / arr.length;
+    const y = h / 2 - (arr[i] / mx) * (h * 0.45);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+}
+
+function drawBetaHistory(ctx, w, h) {
+  ctx.fillStyle = '#050505';
+  ctx.fillRect(0, 0, w, h);
+
+  // Grid
+  ctx.strokeStyle = '#1a1a1a';
+  ctx.lineWidth = 0.5;
+  for (let i = 1; i < 4; i++) {
+    const y = (h * i) / 4;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(w, y);
+    ctx.stroke();
+  }
+
+  // Baseline band
+  if (state.baseline !== null) {
+    const yMax = 3.0, yMin = -0.5;
+    const yFromBeta = (b) => h - ((b - yMin) / (yMax - yMin)) * h;
+    ctx.fillStyle = 'rgba(0, 255, 159, 0.10)';
+    const yTop = yFromBeta(state.baseline + 2 * state.baselineStd);
+    const yBot = yFromBeta(state.baseline - 2 * state.baselineStd);
+    ctx.fillRect(0, yTop, w, yBot - yTop);
+
+    ctx.strokeStyle = '#00ff9f';
+    ctx.setLineDash([4, 4]);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, yFromBeta(state.baseline));
+    ctx.lineTo(w, yFromBeta(state.baseline));
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  if (state.betaHistory.length < 2) return;
+
+  const yMax = 3.0, yMin = -0.5;
+  const yFromBeta = (b) => h - ((b - yMin) / (yMax - yMin)) * h;
+
+  ctx.strokeStyle = '#ffaa00';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  const len = state.betaHistory.length;
+  for (let i = 0; i < len; i++) {
+    const x = (w * i) / (BETA_HISTORY - 1);
+    const y = yFromBeta(state.betaHistory[i]);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+}
+
+function drawScore(ctx, w, h) {
+  ctx.fillStyle = '#050505';
+  ctx.fillRect(0, 0, w, h);
+
+  // Grid
+  ctx.strokeStyle = '#1a1a1a';
+  ctx.lineWidth = 0.5;
+  for (let i = 1; i < 4; i++) {
+    const y = (h * i) / 4;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(w, y);
+    ctx.stroke();
+  }
+
+  if (state.scoreHistory.length < 2) return;
+
+  const yMax = 6.0, yMin = 0;
+  const yFromScore = (s) => h - (s / yMax) * h;
+
+  // Threshold
+  ctx.strokeStyle = '#ff3366';
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  ctx.moveTo(0, yFromScore(2.0));
+  ctx.lineTo(w, yFromScore(2.0));
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.strokeStyle = '#ff00ff';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  const len = state.scoreHistory.length;
+  for (let i = 0; i < len; i++) {
+    const x = (w * i) / (BETA_HISTORY - 1);
+    const y = yFromScore(Math.min(state.scoreHistory[i], yMax));
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+}
+
+// === Anomaly injection ===
+function applyAnomaly(v) {
+  if (!state.anomalyMode || state.anomalyTicks <= 0) return v;
+  state.anomalyTicks--;
+  switch (state.anomalyMode) {
+    case 'spike':
+      if (state.anomalyTicks > 95) return 12;
+      return v;
+    case 'regime':
+      // Regenerate buffer at high β
+      if (state.anomalyTicks === 99) {
+        state.generator = new ColoredNoiseGenerator(2.5);
+      }
+      return state.generator.next();
+    case 'dist':
+      // Uniform distribution
+      return (Math.random() - 0.5) * 4;
+    case 'freq':
+      // Sine wave inject
+      const t = (100 - state.anomalyTicks) / 100;
+      return v + 2 * Math.sin(2 * Math.PI * 8 * t);
+    default: return v;
+  }
+}
+
+// === Main loop ===
+let tickCount = 0;
+function tick() {
+  if (!state.paused) {
+    // Generate sample
+    let v = state.generator.next();
+    v = applyAnomaly(v);
+    if (state.noiseSigma > 0) v += gaussian() * state.noiseSigma;
+    pushSignal(v);
+
+    // Reset generator if anomaly ended
+    if (state.anomalyTicks === 0 && state.anomalyMode === 'regime') {
+      state.generator = new ColoredNoiseGenerator(state.beta);
+      state.anomalyMode = null;
+    } else if (state.anomalyTicks === 0) {
+      state.anomalyMode = null;
+    }
+
+    // Every 8 ticks, compute β
+    if (tickCount % 4 === 0 && tickCount > 64) {
+      const win = new Float32Array(64);
+      const sigArr = getSignalArray();
+      for (let i = 0; i < 64; i++) win[i] = sigArr[SIGNAL_HISTORY - 64 + i];
+      const b = computeBeta(win);
+
+      // Baseline collection phase
+      if (state.baseline === null) {
+        state.baselineCollect.push(b);
+        if (state.baselineCollect.length >= BASELINE_SAMPLES) {
+          let m = 0;
+          for (const x of state.baselineCollect) m += x;
+          m /= state.baselineCollect.length;
+          let std = 0;
+          for (const x of state.baselineCollect) std += (x - m) ** 2;
+          std = Math.sqrt(std / state.baselineCollect.length) + 1e-9;
+          state.baseline = m;
+          state.baselineStd = std;
+        }
+      }
+
+      state.betaHistory.push(b);
+      if (state.betaHistory.length > BETA_HISTORY) state.betaHistory.shift();
+
+      if (state.baseline !== null) {
+        const z = Math.abs(b - state.baseline) / state.baselineStd;
+        state.scoreHistory.push(z);
+        if (state.scoreHistory.length > BETA_HISTORY) state.scoreHistory.shift();
+
+        // Update UI
+        document.getElementById('currentBetaVal').textContent = b.toFixed(2);
+        const zEl = document.getElementById('zVal');
+        zEl.textContent = z.toFixed(2);
+        const statusEl = document.getElementById('statusVal');
+        if (z > 2.0) {
+          zEl.className = 'val anom';
+          statusEl.textContent = 'ANOMALY';
+          statusEl.className = 'val anom';
+        } else if (z > 1.0) {
+          zEl.className = 'val warn';
+          statusEl.textContent = 'caution';
+          statusEl.className = 'val warn';
+        } else {
+          zEl.className = 'val normal';
+          statusEl.textContent = 'normal';
+          statusEl.className = 'val normal';
+        }
+        document.getElementById('baselineVal').textContent = state.baseline.toFixed(2) + ' ± ' + state.baselineStd.toFixed(2);
+      } else {
+        document.getElementById('statusVal').textContent = `collecting ${state.baselineCollect.length}/${BASELINE_SAMPLES}`;
+      }
+    }
+    tickCount++;
+  }
+
+  // Render
+  for (const id of ['signalCanvas', 'betaCanvas', 'scoreCanvas']) {
+    const canvas = document.getElementById(id);
+    const ctx = canvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+    if (canvas.width !== canvas.clientWidth * dpr) {
+      canvas.width = canvas.clientWidth * dpr;
+      canvas.height = canvas.clientHeight * dpr;
+      ctx.scale(dpr, dpr);
+    }
+    if (id === 'signalCanvas') drawSignal(ctx, canvas.clientWidth, canvas.clientHeight);
+    else if (id === 'betaCanvas') drawBetaHistory(ctx, canvas.clientWidth, canvas.clientHeight);
+    else drawScore(ctx, canvas.clientWidth, canvas.clientHeight);
+  }
+
+  requestAnimationFrame(tick);
+}
+
+// === Event handlers ===
+document.getElementById('betaSlider').addEventListener('input', (e) => {
+  state.beta = parseFloat(e.target.value);
+  document.getElementById('betaSliderVal').textContent = state.beta.toFixed(2);
+  if (state.anomalyMode !== 'regime') {
+    state.generator = new ColoredNoiseGenerator(state.beta);
+  }
+});
+
+document.getElementById('noiseSlider').addEventListener('input', (e) => {
+  state.noiseSigma = parseFloat(e.target.value);
+  document.getElementById('noiseSliderVal').textContent = state.noiseSigma.toFixed(1);
+});
+
+document.querySelectorAll('button[data-anom]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    state.anomalyMode = btn.dataset.anom;
+    state.anomalyTicks = 100;
+  });
+});
+
+document.getElementById('refit').addEventListener('click', () => {
+  state.baseline = null;
+  state.baselineStd = null;
+  state.baselineCollect = [];
+  state.betaHistory = [];
+  state.scoreHistory = [];
+});
+
+document.getElementById('pause').addEventListener('click', (e) => {
+  state.paused = !state.paused;
+  e.target.textContent = state.paused ? 'Resume' : 'Pause';
+});
+
+tick();
+</script>
+</body>
+</html>
