@@ -222,6 +222,14 @@ def run():
 
 
 @app.local_entrypoint()
+def dump_json():
+    """Print full results as single JSON line for local viz parsing."""
+    import json
+    results = fetch_all.remote()
+    print("JSON_DUMP:" + json.dumps(results))
+
+
+@app.local_entrypoint()
 def fetch():
     results = fetch_all.remote()
     if not results:
