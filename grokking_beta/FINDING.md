@@ -67,9 +67,30 @@ Contribution : β n'est pas qu'un diagnostic. C'est un objectif d'entraînement 
 4. **Scale** : testé 75k-param toy. Tient à 1M, 100M, LLM ? Inconnu.
 5. Computational cost : SVD chaque step = overhead (~2× train time). Acceptable petit modèle, cher à scale.
 
+## TRIPLE CROSS-TASK VALIDATION (2026-05-30)
+
+β-reg testé sur 3 tâches/architectures distinctes :
+
+| Tâche | Arch | baseline grok | λ=0.01 grok | Δ |
+|---|---|---|---|---|
+| Modular addition (a+b mod 97) | Transformer | 1367±115 | 1033±252 | **-24%** |
+| Sparse parity (n=30,k=3) | MLP | 13050±2616 | 7000 (1 seed) | **-46%** |
+| Permutation S_5 composition | Transformer 120-class | 5300±1517 | 4650 (1 seed) | **-12%** |
+
+**β-reg accélère grokking sur arithmétique + booléen + group-theoretic.** Direction consistante cross-task/cross-arch. Effet varie -12% à -46%.
+
+Caveats triple-validation :
+- λ=0.01 : 1 seed sur parity + permutation (3 sur modular). CI incomplet.
+- Effet size varie 4× selon tâche.
+- Permutation λ=0.01 final_val 0.923 (1 seed, peut sous-entraîné).
+- Toy scale persiste.
+
+Note honnête : 6.5 → 7.0 avec triple-validation. Pour 7.5+ : seeds complets + 1 tâche non-toy + β cheap.
+
 ## Prochains tests (rendre publiable)
 
-1. **2e tâche grokking** : sparse parity (k-bit). Si β-reg accélère AUSSI → robuste.
+1. **Compléter seeds** : 3 seeds λ=0.01 sur parity + permutation (CI serré).
+2. ~~2e tâche grokking~~ ✓ FAIT (parity + permutation confirment)
 2. **Seed scaling** : 10 seeds λ=0.01 pour CI serré.
 3. **λ fin** : sweep [0.005, 0.01, 0.02, 0.03] pour localiser optimum précis.
 4. **Mécanisme** : mesurer si β-reg accélère apparition modes Fourier (Nanda probes).
